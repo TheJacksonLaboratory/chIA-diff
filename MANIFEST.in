@@ -1,2 +1,2 @@
-recursive-include chiapet_rep *.pyx
-recursive-include chiapet_rep *.c
+recursive-include chia_diff *.pyx
+recursive-include chia_diff *.c

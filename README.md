@@ -1,4 +1,4 @@
-# ChIA-Rep 
+# ChIA-diff 
 A Python package for assessing the reproducibility of ChIA-PET datasets.    
     
 ## Methods Overview 

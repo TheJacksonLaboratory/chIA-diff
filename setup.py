@@ -3,12 +3,12 @@ from distutils.extension import Extension
 from Cython.Build import cythonize
 
 extensions = [
-    Extension('chia_rep.chia_rep_util',
-              ['chia_rep/chia_rep_util.pyx']),
+    Extension('chia_diff.cython_util',
+              ['chia_diff/cython_util.pyx']),
 ]
 
-NAME = 'chia_rep'
-VERSION = '0.0.2'
+NAME = 'chia_diff'
+VERSION = '0.0.1'
 
 setuptools.setup(
 
@@ -20,13 +20,13 @@ setuptools.setup(
 
     author_email="henrybzhang.99@gmail.com",
 
-    description="A package for measuring reproducibility of ChIA-PET data.",
+    description="A package for measuring difference of ChIA-PET data.",
 
     long_description=open('README.md').read(),
 
     long_description_content_type="text/markdown",
 
-    url="https://github.com/c0ver/chia_rep",
+    url="https://github.com/c0ver/chia_diff",
 
     packages=setuptools.find_packages(),
 
