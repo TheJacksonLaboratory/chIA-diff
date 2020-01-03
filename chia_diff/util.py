@@ -142,6 +142,6 @@ def read_data(loop_data_dir, chrom_size_file, bigwig_data_dir=None,
     return loop_data_dict
 
 
-def preprocess(loop_dict, window_size):
+def preprocess(loop_dict, window_size=None):
     for sample_name in loop_dict:
         loop_dict[sample_name].preprocess(window_size)

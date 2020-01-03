@@ -4,17 +4,18 @@ log = logging.getLogger()
 
 MIN_NUMB_LOOPS = 5
 MAX_LOOP_LEN = 1000000  # 1mb
+MIN_LOOP_LEN = 8000  # 8kb
+MAX_AVG_ANCHOR_LEN = 5000
 
 VERSION = 61
 
 MAX_USHRT = 65535
 MIN_RATIO_INCREASE = 1.1
 
-
 MIN_PEAK_VALUE = 70
 
+
 # The length of each normalization call
-PEAK_BIN_LEN = 2
 
 
 class ChromLoopData:
@@ -61,6 +62,7 @@ class ChromLoopData:
         self.end_list_peak_values = None
 
         self.peak_bins = None
+        self.peak_bin_size = PEAK_BIN_LEN
 
         self.window_loop_list = []
         self.window_total_loop_count = []
@@ -72,6 +74,12 @@ class ChromLoopData:
 
     def add_loop(self, loop_start1, loop_end1, loop_start2, loop_end2,
                  loop_value):
+        avg_anchor_len = ((loop_end1 - loop_start1) + (loop_end2 - loop_start2)) / 2
+
+        # Loop span: end of (start anchor) -> start of (end anchor)
+        if loop_start2 - loop_end1 < MIN_LOOP_LEN and \
+                avg_anchor_len > MAX_AVG_ANCHOR_LEN:
+            return
 
         self.start_anchor_list[0].append(loop_start1)
         self.start_anchor_list[1].append(loop_end1)
@@ -123,16 +131,17 @@ class ChromLoopData:
 
     def find_loop_anchor_points(self, bedgraph):
         """
-        Finds the exact loop anchor points.
+        Finds the max for small non-overlapping bins over the entire chromosome.
 
-        Finds peak values for each anchor and weighs the loop. Also finds loops
-        that have overlapping start/end indexes due to close and long start/end
-        anchors.
+        Also finds the exact loop start/end point within anchors by finding the
+        index of max value within anchors.
+
+        Also finds the max value inside every anchor. (currently unused)
 
         Parameters
         ----------
         bedgraph : BedGraph
-            Used to find the anchor points of each loop
+            Used to find the coverage values for anchor of each loop
         """
 
         log.info(f'Finding anchor points for {self.sample_name}\'s {self.name}'
@@ -140,14 +149,22 @@ class ChromLoopData:
 
         bedgraph.load_chrom_data(self.name)
 
-        norm_start_test = np.arange(0, self.size, PEAK_BIN_LEN, dtype=np.int32)
-        norm_end_test = norm_start_test + PEAK_BIN_LEN
-        if norm_end_test[-1] > self.size:
-            norm_end_test[-1] = self.size
-        self.peak_bins = bedgraph.stats(start_list=norm_start_test,
-                                        end_list=norm_end_test,
+        peak_bin_starts = np.arange(0, self.size, PEAK_BIN_LEN, dtype=np.int32)
+        peak_bin_ends = peak_bin_starts + PEAK_BIN_LEN
+        if peak_bin_ends[-1] > self.size:
+            peak_bin_ends[-1] = self.size
+        self.peak_bins = bedgraph.stats(start_list=peak_bin_starts,
+                                        end_list=peak_bin_ends,
                                         chrom_name=self.name, stat='max')
-        self.peak_bins += 1  # To avoid zeros when summing
+
+        if not os.path.isdir('out'):
+            os.mkdir('out')
+
+        with open(f'out/{self.sample_name}.peak_bins={PEAK_BIN_LEN}.txt',
+                  'w') as out_file:
+            for i in range(len(self.peak_bins)):
+                out_file.write(f'{i * PEAK_BIN_LEN}\t{self.peak_bins[i]}\n')
+        # self.peak_bins += 1  # To avoid zeros when summing
 
         # Get index of peaks in every anchor interval
         self.start_list = bedgraph.stats(start_list=self.start_anchor_list[0],
@@ -183,6 +200,8 @@ class ChromLoopData:
             # Remove anchors that have the same* peak
             # Keep indexes of loop length to avoid comparisons in interval
             if not loop_start < loop_end:
+                # Currently unused since smaller loop lengths are filtered
+                # earlier
                 self.pet_count_list[i] = 0
 
                 # Removed interval goes from
@@ -203,24 +222,32 @@ class ChromLoopData:
 
         self.max_loop_value = np.max(self.pet_count_list)
 
-        # Should be very small due to peaks being weighted earlier
         log.debug(f"Max loop weighted value: {self.max_loop_value}")
 
-    # May have more pre-processing to do besides filtering later?
-    # Useless extra function otherwise
-    def preprocess(self, window_size):
-        # success = self.filter_with_peaks(peak_list, both_peak_support)
+    def preprocess(self, window_size=None):
+        """
+        Finds the loops in each window and adds weights to their anchors
 
-        # if success:
-        #    self.find_window_loops(window_size)
+        Parameters
+        ----------
+        window_size : int, optional
+            The size of the sliding window
+            (Default is the size of the chromosome)
+        """
 
-        # return success
+        if not window_size:
+            window_size = self.size
 
         self.numb_windows = ceil(self.size / window_size)
         self.window_size = window_size
 
-        if window_size % PEAK_BIN_LEN != 0:
-            log.error(f'Window size: {window_size} must be a multiple of '
+        # if window_size % PEAK_BIN_LEN != 0:
+        #     log.error(f'Window size: {window_size} must be a multiple of '
+        #               f'PEAK_BIN_LEN: {PEAK_BIN_LEN}')
+        #     return False
+
+        if window_size < PEAK_BIN_LEN:
+            log.error(f'Window size: {window_size} must be greater than '
                       f'PEAK_BIN_LEN: {PEAK_BIN_LEN}')
             return False
 
@@ -230,6 +257,10 @@ class ChromLoopData:
         return True
 
     def find_window_loops(self):
+        """
+        Finds the indexes of the loops within each window and stores them in
+        window_loop_list
+        """
 
         self.window_loop_list.clear()
         self.window_total_loop_count.clear()
@@ -250,7 +281,17 @@ class ChromLoopData:
             self.window_loop_list.append(loop_indexes)
             self.window_total_loop_count.append(total_value)
 
-    def weight_loops(self, output_dir=None):
+    def weight_loops(self, output_dir='weighted_loops'):
+        """
+        Weights each loop based on coverage within its anchors.
+        Each window has its own normalized list of coverage that is used for
+        weighting the loops.
+
+        Parameters
+        ----------
+        output_dir : str, optional
+            Directory to output weighted loops (Default is None)
+        """
 
         self.window_peak_list.clear()
 
@@ -259,22 +300,35 @@ class ChromLoopData:
             out_file = open(f'{output_dir}/{self.sample_name}.txt', 'w')
 
         for i in range(self.numb_windows):
-            log.debug(f'Weighting loops in window: {i}')
+            log.debug(f'Weighting loops in Window {i}')
 
             window_start = i * self.window_size
             window_end = window_start + self.window_size
 
             start = int(window_start / PEAK_BIN_LEN)
-            end = int(window_end / PEAK_BIN_LEN)
-
-            peak_list = np.array(self.peak_bins[start:end])
-            # log.debug(f'Unweighted peak values: {peak_list}')
-            peak_list /= peak_list.sum()
-            # log.debug(f'Weighted peak values: {peak_list}')
-
-            self.window_peak_list.append(peak_list)
+            end = ceil(window_end / PEAK_BIN_LEN)
 
             numb_loops = self.window_loop_list[i].size
+
+            if numb_loops == 0:
+                log.info('No loops in this window')
+                continue
+
+            # Get the coverages only from this window
+            window_coverage_list = np.array(self.peak_bins[start:end])
+            # log.debug(f'Unweighted peak values: {peak_list}')
+
+            # Make all loops are initialized to have 0 weight
+            if window_coverage_list.sum() == 0:
+                continue
+
+            # Normalize the list specific to this window
+            window_coverage_list /= window_coverage_list.sum()
+            # log.debug(f'Weighted peak values: {peak_list}')
+
+            self.window_peak_list.append(window_coverage_list)
+
+            # Get a continuous list of the anchors in this window
             start_anchors = (np.empty(numb_loops, dtype=np.int32),
                              np.empty(numb_loops, dtype=np.int32))
             end_anchors = (np.empty(numb_loops, dtype=np.int32),
@@ -285,7 +339,8 @@ class ChromLoopData:
                 end_anchors[0][j] = self.end_anchor_list[0][loop_index]
                 end_anchors[1][j] = self.end_anchor_list[1][loop_index]
 
-                # Fixes that are not good
+                # Part of the anchor may be outside the window even though the
+                # peak index of the anchor is inside
                 if start_anchors[0][j] < window_start:
                     start_anchors[0][j] = window_start
                 if end_anchors[1][j] > window_end:
@@ -295,13 +350,13 @@ class ChromLoopData:
             # log.debug(f'End anchors: {end_anchors}')
 
             start_weights = get_total_bin_value(
-                peak_list, PEAK_BIN_LEN, start_anchors[0] - window_start,
-                start_anchors[1] - window_start)
+                window_coverage_list, PEAK_BIN_LEN,
+                start_anchors[0] - window_start, start_anchors[1] - window_start)
             # log.debug(f'Start anchor weights: {start_weights}')
 
             end_weights = get_total_bin_value(
-                peak_list, PEAK_BIN_LEN, end_anchors[0] - window_start,
-                end_anchors[1] - window_start)
+                window_coverage_list, PEAK_BIN_LEN,
+                end_anchors[0] - window_start, end_anchors[1] - window_start)
             # log.debug(f'End anchor weights: {end_weights}')
 
             # Populate the original array
@@ -309,19 +364,21 @@ class ChromLoopData:
                 self.start_anchor_weights[loop_index] = start_weights[j]
                 self.end_anchor_weights[loop_index] = end_weights[j]
 
-            if out_file:
-                for j in range(self.numb_loops):
-                    out_file.write(f'{self.name}\t'
-                                   f'{self.start_anchor_list[0][j]}\t'
-                                   f'{self.start_anchor_list[1][j]}\t'
-                                   f'{self.start_list[j]}\t'
-                                   f'{self.name}\t'
-                                   f'{self.end_anchor_list[0][j]}\t'
-                                   f'{self.end_anchor_list[1][j]}\t'
-                                   f'{self.end_list[j]}\t'
-                                   f'{self.pet_count_list[j]}\t'
-                                   f'{round(self.start_anchor_weights[j], 5)}\t'
-                                   f'{round(self.end_anchor_weights[j], 5)}\n')
+        if out_file:
+            out_str = ''
+            for j in range(self.numb_loops):
+                out_str += (f'{self.name}\t'
+                            f'{self.start_anchor_list[0][j]}\t'
+                            f'{self.start_anchor_list[1][j]}\t'
+                            f'{self.start_list[j]}\t'
+                            f'{self.name}\t'
+                            f'{self.end_anchor_list[0][j]}\t'
+                            f'{self.end_anchor_list[1][j]}\t'
+                            f'{self.end_list[j]}\t'
+                            f'{self.pet_count_list[j]}\t'
+                            f'{round(self.start_anchor_weights[j], 5)}\t'
+                            f'{round(self.end_anchor_weights[j], 5)}\n')
+            out_file.write(out_str)
 
         if out_file:
             out_file.close()
@@ -450,6 +507,5 @@ class ChromLoopData:
     #         graph[start_index][end_index] += value
     #
     #     return graph / graph.sum()
-
 
 #  END
