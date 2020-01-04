@@ -17,18 +17,20 @@ PEAK_LEN_INDEX = 2
 PEAK_MAX_VALUE_INDEX = 3
 PEAK_MEAN_VALUE_INDEX = 4
 
+BIN_WEIGHT_INDEX = -1
+
 PEAK_BIN_LEN = 500
 
-VERSION = 6
+VERSION = 8
 
 log = logging.getLogger()
 random.seed(0)
 np.random.seed(0)
 
 
-def get_removed_area(chrom_size, chrom_list):
+def get_skipped_area(chrom_size, chrom_list):
     """
-    Gets removed area from both samples so no loops from that area are compared
+    Gets skipped area from both samples so no loops from that area are compared
 
     Parameters
     ----------
@@ -60,29 +62,28 @@ def get_removed_area(chrom_size, chrom_list):
     return removed_area
 
 
-def create_graph_adj_list(chrom, loop_indexes, bin_size, window_start, window_end):
+def create_graph_adj_list(chrom, loop_indexes, bin_size, window_start,
+                          window_end):
     node_dict = {}
 
     for loop_index in loop_indexes:
-        value = chrom.pet_count_list[loop_index]
+        pet_count = chrom.pet_count_list[loop_index]
         start = chrom.start_list[loop_index]
         end = chrom.end_list[loop_index]
 
         assert end < window_end
         assert start > window_start
 
-        bin_start = start - window_start
-        bin_end = end - window_start
-
-        bin_start = int(bin_start / bin_size)
-        bin_end = int(bin_end / bin_size)
+        # Round down
+        bin_start = int((start - window_start) / bin_size)
+        bin_end = int((end - window_start) / bin_size)
 
         # Filter out loops that start and end in the same bin
         if bin_start == bin_end:
             continue
 
-        forward_value = value * chrom.start_anchor_weights[loop_index]
-        back_value = value * chrom.end_anchor_weights[loop_index]
+        forward_value = pet_count * chrom.start_anchor_weights[loop_index]
+        back_value = pet_count * chrom.end_anchor_weights[loop_index]
 
         if back_value != 0:
             if bin_end not in node_dict:
@@ -122,20 +123,51 @@ def create_graph_adj_list(chrom, loop_indexes, bin_size, window_start, window_en
 
     for i in range(len(normalized_peak_bins)):
         bin_weight += normalized_peak_bins[i]
-        if i % numb_peak_bins == 0:
+        if (i + 1) % numb_peak_bins == 0:
             bin_weights.append(bin_weight)
             bin_weight = 0
 
+    assert bin_weight == 0
+
     # log.debug(f'Bin Weights: {bin_weights}')
 
+    total_nodes = len(node_dict)
+    total_potential_nodes = ceil((window_end - window_start) / bin_size)
+    # log.info(f'{(total_potential_nodes - total_nodes) / total_potential_nodes * 100}% of '
+    #          f'bins have zero loops attached')
+
+    node_degrees = []
+    max_loop_bin_value = 0
     for bin_start, node in node_dict.items():
         bin_ends = np.array(list(node.keys()))
         loops = np.array(list(node.values()))
 
-        node_dict[bin_start] = (bin_ends, loops / np.sum(loops),
-                                bin_weights[bin_start])
+        node_degrees.append(len(bin_ends))
 
-    return node_dict
+        if np.max(loops) > max_loop_bin_value:
+            max_loop_bin_value = np.max(loops)
+
+        node_dict[bin_start] = [bin_ends, loops / np.sum(loops), np.max(loops),
+                                bin_weights[bin_start]]
+
+    log.info(f'Max value in loop bin: {max_loop_bin_value}')
+    for bin_start in node_dict:
+        node_dict[bin_start][2] = node_dict[bin_start][2] / max_loop_bin_value
+
+    bin_numb = int(815000 / bin_size)
+    if window_start == 0 and bin_numb in node_dict:
+        print(node_dict[bin_numb])
+
+    # for i in range(1, 10):
+    #     log.info(
+    #         f'{len([x for x in node_degrees if x == i]) / total_potential_nodes * 100}% of '
+    #         f'bins have {i} loops attached')
+
+    # bins = [i for i in range(9)] + [max(node_degrees)]
+    # hist, bin_edges = np.histogram(node_degrees, bins)
+    # print(hist)
+
+    return node_dict, max_loop_bin_value
 
 
 def create_graph_matrix(chrom, loops, bin_size, window_start, to_debug=False,
@@ -358,7 +390,7 @@ def diff_chrom_window(chrom1, chrom2, window_start, window_end, bin_size,
         log.error(f'{chrom1.size / bin_size} is too many rows for a graph')
         return []
 
-    combined_removed = get_removed_area(chrom1.size, [chrom1, chrom2])
+    combined_removed = get_skipped_area(chrom1.size, [chrom1, chrom2])
 
     # Get loops again in case a specific window_start/end was given
     loop_indexes = get_loops(window_start, window_end, combined_removed,
@@ -443,24 +475,35 @@ def diff_chrom_window(chrom1, chrom2, window_start, window_end, bin_size,
 
 
 def walk_graph(start_nodes, adj_list_dict, walk_len, window_start, bin_size,
-               path_list, bin_popularity, is_null_edge):
+               path_list, bin_popularity, is_null_edge, max_node_weight,
+               max_loop_bin_value, all_node_list=None):
     """
     Walk through the given graph and keep track of the
 
     """
+    test_count = 0
 
-    all_node_list = list(adj_list_dict.keys())
-    numb_all_nodes = len(all_node_list)
+    if is_null_edge:
+        assert all_node_list
+        numb_all_nodes = len(all_node_list)
+        assert numb_all_nodes > 1
 
-    assert numb_all_nodes > 1
-
-    for start_bin in start_nodes:
+    for i, start_bin in enumerate(start_nodes):
         curr_bin_numb = start_bin
+
+        if start_bin not in adj_list_dict:
+            path_list.append(start_bin)
+            continue
 
         curr_node = adj_list_dict[start_bin]
         path = [start_bin]
 
-        for _ in range(walk_len - 1):
+        # for j in range(walk_len - 1):
+        while True:
+
+            if not np.random.binomial(1, curr_node[2]):
+                break
+
             if is_null_edge:
                 # Supposedly faster to do it this way
                 while True:
@@ -482,6 +525,10 @@ def walk_graph(start_nodes, adj_list_dict, walk_len, window_start, bin_size,
                 bin_popularity[curr_path] = 0
             bin_popularity[curr_path] += 1
 
+            # if curr_path == '2050000-2060000' and window_start == 0:
+            #     print(i, j, path)
+            #     test_count += 1
+
             if next_bin_numb not in adj_list_dict:
                 break
 
@@ -498,10 +545,16 @@ def walk_graph(start_nodes, adj_list_dict, walk_len, window_start, bin_size,
         # path_len = len(path)
         # path.append(path_len)
 
+        # if (start_bin == 410 or start_bin == 427) and window_start == 0:
+        #     # test_count += 1
+        #     print(i, path)
+
         path_list.append(path)
 
+    # print(test_count)
 
-def random_walk(chrom, loop_bin_size, walk_len=5, walk_iter=5000,
+
+def random_walk(chrom, loop_bin_size, walk_len=3, walk_iter=50000,
                 window_start=0, window_end=None):
     """
     Runs random walk(s) for the chromosome in the given window
@@ -531,7 +584,7 @@ def random_walk(chrom, loop_bin_size, walk_len=5, walk_iter=5000,
     log.debug(f'Random walking on {chrom.sample_name}: {walk_len} {walk_iter} '
               f'{window_start}-{window_end}')
 
-    combined_removed = get_removed_area(chrom.size, [chrom])
+    combined_removed = get_skipped_area(chrom.size, [chrom])
 
     # Get loops again in case a specific window_start/end was given
     loop_indexes = get_loops(window_start, window_end, combined_removed,
@@ -542,12 +595,20 @@ def random_walk(chrom, loop_bin_size, walk_len=5, walk_iter=5000,
         return None
 
     # Create the graph adjacency list
-    adj_list_dict = create_graph_adj_list(chrom, loop_indexes, loop_bin_size,
-                                          window_start, window_end)
+    adj_list_dict, max_loop_bin_value = \
+        create_graph_adj_list(chrom, loop_indexes, loop_bin_size, window_start,
+                              window_end)
+
+    unattached_bins = []
+    for bin_numb in range(ceil((window_end - window_start) / loop_bin_size)):
+        if bin_numb not in adj_list_dict:
+            unattached_bins.append(bin_numb)
 
     # Get the list of node weights and normalize them
     node_list = list(adj_list_dict.keys())
-    node_weights = [adj_list_dict[node][2] for node in node_list]
+    node_weights = [adj_list_dict[node][BIN_WEIGHT_INDEX] for node in node_list]
+
+    total_potential_nodes = unattached_bins + node_list
 
     if np.sum(node_weights) == 0:
         log.warning(f'No bedgraph values in {window_start}-{window_end}')
@@ -574,10 +635,11 @@ def random_walk(chrom, loop_bin_size, walk_len=5, walk_iter=5000,
     all_null_popularity = {}
 
     start_nodes = np.random.choice(node_list, size=walk_iter, p=node_weights)
-    null_start_nodes = np.random.choice(node_list, size=walk_iter)
+    null_start_nodes = np.random.choice(total_potential_nodes, size=walk_iter)
 
     with open(f'random_walks/{chrom.sample_name}.{chrom.name}.'
-              f'{window_start}-{window_end}.normal_start_node.txt', 'w') as out_file:
+              f'{window_start}-{window_end}.normal_start_node.txt',
+              'w') as out_file:
         node_popularity = {}
         for node in start_nodes:
             if node not in node_popularity:
@@ -589,10 +651,13 @@ def random_walk(chrom, loop_bin_size, walk_len=5, walk_iter=5000,
                                      key=lambda l: l[1], reverse=True)}
 
         for node in node_popularity:
-            out_file.write(f'{node * loop_bin_size + window_start}\t{node_popularity[node]}\n')
+            node_start = node * loop_bin_size + window_start
+            out_file.write(
+                f'{chrom.name}\t{node_start}\t{node_start + loop_bin_size}\t{node_popularity[node]}\n')
 
     with open(f'random_walks/{chrom.sample_name}.{chrom.name}.'
-              f'{window_start}-{window_end}.null_start_node.txt', 'w') as out_file:
+              f'{window_start}-{window_end}.null_start_node.txt',
+              'w') as out_file:
         node_popularity = {}
         for node in null_start_nodes:
             if node not in node_popularity:
@@ -604,85 +669,104 @@ def random_walk(chrom, loop_bin_size, walk_len=5, walk_iter=5000,
                                      key=lambda l: l[1], reverse=True)}
 
         for node in node_popularity:
-            out_file.write(f'{node * loop_bin_size + window_start}\t{node_popularity[node]}\n')
+            node_start = node * loop_bin_size + window_start
+            out_file.write(
+                f'{chrom.name}\t{node_start}\t{node_start + loop_bin_size}\t{node_popularity[node]}\n')
 
-    walk_graph(start_nodes, adj_list_dict, walk_len, window_start, loop_bin_size,
-               path_list, bin_popularity, False)
+    walk_graph(start_nodes, adj_list_dict, walk_len, window_start,
+               loop_bin_size,
+               path_list, bin_popularity, False, max(node_weights),
+               max_loop_bin_value)
 
-    walk_graph(start_nodes, adj_list_dict, walk_len, window_start, loop_bin_size,
-               edge_null_walks, edge_null_popularity, True)
+    walk_graph(start_nodes, adj_list_dict, walk_len, window_start,
+               loop_bin_size,
+               edge_null_walks, edge_null_popularity, True, max(node_weights),
+               max_loop_bin_value, total_potential_nodes)
 
     walk_graph(null_start_nodes, adj_list_dict, walk_len, window_start,
-               loop_bin_size, all_null_walks, all_null_popularity, True)
+               loop_bin_size, all_null_walks, all_null_popularity, True,
+               1 / len(total_potential_nodes),
+               max_loop_bin_value, total_potential_nodes)
 
     bin_popularity = \
         {k: v for k, v in sorted(bin_popularity.items(),
                                  key=lambda l: l[1], reverse=True)}
 
-    output_random_walks(chrom, bin_popularity, walk_len, walk_iter,
-                        window_start, window_end, 'normal')
+    output_random_walk_loops(walk_iter, chrom.window_size, loop_bin_size,
+                             'normal', bin_popularity)
 
-    output_random_walks(chrom, edge_null_popularity, walk_len, walk_iter,
-                        window_start, window_end, 'edge_null')
+    output_random_walk_loops(walk_iter, chrom.window_size, loop_bin_size,
+                             'edge_null', edge_null_popularity)
 
-    output_random_walks(chrom, all_null_popularity, walk_len, walk_iter,
-                        window_start, window_end, 'all_null')
+    output_random_walk_loops(walk_iter, chrom.window_size, loop_bin_size,
+                             'all_null', all_null_popularity)
 
     return path_list, bin_popularity
 
 
-def output_random_walks(chrom, bin_popularity, walk_len, walk_iter,
-                        window_start, window_end, walk_type):
-    with open(f'random_walks/{chrom.sample_name}.{chrom.name}.'
-              f'{window_start}-{window_end}.walk_len={walk_len}.'
-              f'walk_iter={walk_iter}.{walk_type}_popularity.txt', 'w') \
-            as out_file:
+def combine_random_walks(sample_popularity):
+    combined_popularity_dict = {}
+    for sample_num, sample in enumerate(sample_popularity):
+        combined_popularity_dict[sample] = {}
+        for chrom_name in sample:
+            chrom_popularity = sample_popularity[sample][chrom_name]
+            combined_chrom_popularity = combined_popularity_dict[sample][
+                chrom_name] = {}
+            for window_start, window_popularity in chrom_popularity.items():
+                for pair in window_popularity:
+                    combined_chrom_popularity[pair] = window_popularity[pair]
 
-        total_bins = 0
-        for count_in_bin in bin_popularity.values():
-            total_bins += count_in_bin
+                    if window_start == 0:
+                        combined_chrom_popularity[pair] += window_popularity[
+                            pair]
 
-        if total_bins != (walk_len - 1) * walk_iter:
-            log.warning(f'Some paths ended early: {total_bins}')
+    return combined_popularity_dict
 
-        sorted_popularity = \
-            {k: v for k, v in sorted(bin_popularity.items(),
-                                     key=lambda l: l[1], reverse=True)}
-        for key, value in sorted_popularity.items():
-            out_file.write(f'{key}\t{value}\n')
+
+def output_random_walk_loops(walk_iter, window_size, loop_bin_size,
+                             walk_type, popularity_dict):
 
     if not os.path.isdir('random_walks/bin_loops'):
         os.mkdir('random_walks/bin_loops')
 
-    with open(f'random_walks/bin_loops/{chrom.sample_name}.{chrom.name}.'
-              f'{window_start}-{window_end}.walk_len={walk_len}.'
-              f'walk_iter={walk_iter}.{walk_type}.forward.loops',
-              'w') as forward_file, \
-            open(f'random_walks/bin_loops/{chrom.sample_name}.{chrom.name}.'
-                 f'{window_start}-{window_end}.walk_len={walk_len}.'
-                 f'walk_iter={walk_iter}.{walk_type}.back.loops',
-                 'w') as back_file:
+    for sample_name in popularity_dict:
+        with open(f'random_walks/bin_loops/{sample_name}.'
+                  f'walk_iter={walk_iter}.window_size={window_size}.'
+                  f'loop_bin_size={loop_bin_size}.{walk_type}.forward.loops',
+                  'w') as forward_file, \
+                open(f'random_walks/bin_loops/{sample_name}.'
+                     f'walk_iter={walk_iter}.window_size={window_size}.'
+                     f'loop_bin_size={loop_bin_size}.{walk_type}.back.loops',
+                     'w') as back_file:
 
-        for key in bin_popularity:
-            anchors = key.split('-')
-            start = int(anchors[0])
-            end = int(anchors[1])
+            for chrom_name in popularity_dict[sample_name]:
+                chrom_dict = popularity_dict[sample_name][chrom_name]
 
-            if end > start:
-                forward_file.write(
-                    f'{chrom.name}\t{start}\t{start + 1}\t{chrom.name}\t'
-                    f'{end}\t{end + 1}\t{bin_popularity[key]}\n')
+                for key in chrom_dict:
+                    anchors = key.split('-')
+                    start = int(anchors[0])
+                    end = int(anchors[1])
 
-            elif start > end:
-                back_file.write(
-                    f'{chrom.name}\t{end}\t{end + 1}\t{chrom.name}\t'
-                    f'{start}\t{start + 1}\t{bin_popularity[key]}\n')
+                    if end > start:
+                        forward_file.write(
+                            f'{chrom_name}\t{start}\t{start + loop_bin_size}\t'
+                            f'{chrom_name}\t{end}\t{end + loop_bin_size}\t'
+                            f'{chrom_dict[key]}\n')
 
-            else:
-                log.warning('Loop with bin')
+                    elif start > end:
+                        back_file.write(
+                            f'{chrom_name}\t{end}\t{end + loop_bin_size}\t'
+                            f'{chrom_name}\t{start}\t{start + loop_bin_size}\t'
+                            f'{chrom_dict[key]}\n')
+
+                    else:
+                        log.warning(f'Detected self loop: {key}. Maybe bug in '
+                                    f'code. Should have removed when creating '
+                                    f'adj list')
 
 
-def compare_random_walks(sample_popularity=None, popularity_folder=None,
+def compare_random_walks(walk_iter, walk_len, sample_popularity=None,
+                         popularity_folder=None,
                          sort_by=None, chrom_name='chr1'):
     if sort_by and sort_by not in sample_popularity:
         raise RuntimeError(f'{sort_by} is not a valid sample name in the first '
@@ -723,7 +807,8 @@ def compare_random_walks(sample_popularity=None, popularity_folder=None,
 
         for window_start, window_popularity in popularity_dict.items():
             with open(f'random_walks/total_popularity_comparison.'
-                      f'window_start={window_start}.old.txt', 'w') as out_file:
+                      f'window_start={window_start}.walk_iter={walk_iter}.'
+                      f'walk_len={walk_len}.txt', 'w') as out_file:
 
                 popularity = prettytable.PrettyTable()
                 popularity.field_names = ['Pair'] + list(sample_popularity) + [
@@ -741,8 +826,8 @@ def compare_random_walks(sample_popularity=None, popularity_folder=None,
                         if sample2_popularity == 0:
                             sample2_popularity = 1
 
-                        popularity_list.append(sample1_popularity /
-                                               sample2_popularity)
+                        popularity_list.append((sample1_popularity + 100) /
+                                               (sample2_popularity + 100))
 
                     popularity.add_row([pair] + popularity_list)
 

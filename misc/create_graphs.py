@@ -27,14 +27,19 @@ PET_CATEGORIES = ['PET Count 2-5', 'PET Count 6-10', 'PET Count > 10']
 
 
 def coverage_bin_density(sample_name, coverage_bins):
+    # if 'LHH0085' in sample_name:
+    #     return
     print(sample_name)
-    inf_arr = np.isinf(coverage_bins)
-    for is_inf in inf_arr:
-        if is_inf:
-            print(f'Skipping {sample_name}')
-            return
-        print(is_inf)
-    (n, bins, patches) = plt.hist(np.log10(coverage_bins), density=1, bins=20)
+    # coverage_bins = [x for x in coverage_bins if x != 0]
+    coverage_bins = [x for x in coverage_bins if x != 0]
+    less_than_10 = 0
+    for coverage in coverage_bins:
+        if coverage < 10:
+            less_than_10 += 1
+
+    print(less_than_10 / len(coverage_bins))
+
+    (n, bins, patches) = plt.hist(np.log10(coverage_bins), density=1, bins=25)
     print(bins)
     print()
     plt.ylabel('Frequency')

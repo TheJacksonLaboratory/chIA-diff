@@ -157,6 +157,16 @@ class ChromLoopData:
                                         end_list=peak_bin_ends,
                                         chrom_name=self.name, stat='max')
 
+        min_peak_value = 0
+        if 'LHM0008' in self.sample_name:
+            min_peak_value = 57
+        elif 'LHM0011' in self.sample_name:
+            min_peak_value = 47
+
+        for i in range(len(self.peak_bins)):
+            if self.peak_bins[i] <= min_peak_value:
+                self.peak_bins[i] = 0
+
         if not os.path.isdir('out'):
             os.mkdir('out')
 

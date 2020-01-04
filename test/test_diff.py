@@ -42,7 +42,7 @@ loop_dict = util.read_data(loop_data_dir=LOOP_DATA_DIR,
                            chroms_to_load=['chr1'])
 
 
-def test_random_walk(bin_size=1000, window_size=3000000):
+def test_random_walk(bin_size=5000, window_size=3000000, walk_len=3, walk_iter=10000):
     print('Testing random walk')
 
     l = deepcopy(loop_dict)
@@ -68,6 +68,8 @@ def test_random_walk(bin_size=1000, window_size=3000000):
                 total_start_time = time.time()
                 walks, popularity = \
                     chia_diff.random_walk(chrom, loop_bin_size=bin_size,
+                                          walk_len=walk_len,
+                                          walk_iter=walk_iter,
                                           window_start=window_start,
                                           window_end=window_end)
                 print(f'Total time: {time.time() - total_start_time}')
@@ -84,7 +86,7 @@ def test_random_walk(bin_size=1000, window_size=3000000):
                 if window_start == 3000000:
                     break
 
-    chia_diff.compare_random_walks(sample_popularity)
+    chia_diff.compare_random_walks(walk_iter, walk_len, sample_popularity)
 
 
 def find_diff():
