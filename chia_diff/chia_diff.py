@@ -191,9 +191,9 @@ def create_graph_adj_list(chrom, loop_indexes, loop_bin_size, window_start,
             node_dict[loop_bin_num][CONTINUE_PROB_INDEX] / max_bin_loop_value
 
     # Debugging purposes
-    bin_numb = int(815000 / loop_bin_size)
-    if window_start == 0 and bin_numb in node_dict:
-        print(node_dict[bin_numb])
+    # bin_numb = int(815000 / loop_bin_size)
+    # if window_start == 0 and bin_numb in node_dict:
+    #     print(node_dict[bin_numb])
 
     # Find percentage of nodes that have n degrees
     # total_nodes = len(node_dict)
@@ -583,7 +583,7 @@ def walk_graph(start_nodes, adj_list_dict, window_start, loop_bin_size,
 def random_walk(chrom, window_start=0, window_end=None, loop_bin_size=5000,
                 walk_iter=50000):
     """
-    Runs random walk(s) for the chromosome in the given window
+    Runs random walk(s) for the chromosome in the given window.
 
     Parameters
     ----------
@@ -599,6 +599,13 @@ def random_walk(chrom, window_start=0, window_end=None, loop_bin_size=5000,
         differential loops. (Default is 5000)
     walk_iter : int, optional
         The number of iterations of random walks. (Default is 50000)
+
+    Returns
+    -------
+    tuple, (2D list, dict)
+        normal path list, normal path popularity
+        random edge path list, random edge path popularity
+        random edge/node path list, random edge/node path popularity
     """
 
     if window_end is None:
@@ -652,6 +659,8 @@ def random_walk(chrom, window_start=0, window_end=None, loop_bin_size=5000,
     all_null_popularity = {}
 
     total_node_list = unused_loop_bins + used_loop_bins
+
+    # Pre-compute the starting nodes for the random walk
     start_nodes = np.random.choice(used_loop_bins, size=walk_iter,
                                    p=node_weights)
     null_start_nodes = np.random.choice(total_node_list, size=walk_iter)

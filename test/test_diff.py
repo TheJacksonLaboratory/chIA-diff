@@ -81,6 +81,8 @@ def test_random_walk(loop_bin_size=5000, window_size=3000000, walk_iter=100000):
                 if window_start == 1500000:
                     break
 
+    util.output_window_random_walk_loops(window_size, loop_bin_size, walk_iter,
+                                         path_popularity, 'normal')
     util.combine_random_walks(path_popularity, window_size)
     util.output_random_walk_loops(window_size, loop_bin_size, walk_iter,
                                   path_popularity, 'normal')

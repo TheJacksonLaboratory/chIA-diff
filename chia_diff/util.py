@@ -167,7 +167,11 @@ def combine_random_walks(path_popularity, window_size):
                 window_popularity = chrom_popularity[window_start]
 
                 for pair in window_popularity:
-                    comb_chrom_popularity[pair] = window_popularity[pair]
+
+                    if pair not in comb_chrom_popularity:
+                        comb_chrom_popularity[pair] = 0
+
+                    comb_chrom_popularity[pair] += window_popularity[pair]
 
                     # Double count the beginning window (and end?)
                     if window_start == 0:
@@ -230,6 +234,48 @@ def output_node_weights(chrom, window_start, window_end, used_loop_bins,
               f'node_weights.txt', 'w') as out_file:
         for i in range(len(used_loop_bins)):
             out_file.write(f'{used_loop_bins[i]}\t{node_weights[i]}\n')
+
+
+def output_window_random_walk_loops(window_size, loop_bin_size, walk_iter,
+                             path_popularity, walk_type):
+
+    if not os.path.isdir('random_walks/window_bin_loops'):
+        os.mkdir('random_walks/window_bin_loops')
+
+    for sample_name, sample_paths in path_popularity.items():
+        for chrom_name, chrom_paths in sample_paths.items():
+            for window_start, window_paths in chrom_paths.items():
+
+                with open(f'random_walks/window_bin_loops/{sample_name}.'
+                          f'start={window_start}.loop_bin_size={loop_bin_size}.'
+                          f'walk_iter={walk_iter}.{walk_type}.forward.loops',
+                          'w') as forward_file, \
+                        open(f'random_walks/window_bin_loops/{sample_name}.'
+                             f'start={window_start}.loop_bin_size={loop_bin_size}.'
+                             f'walk_iter={walk_iter}.{walk_type}.back.loops',
+                             'w') as back_file:
+
+                    for key in window_paths:
+                        anchors = key.split('-')
+                        start = int(anchors[0])
+                        end = int(anchors[1])
+
+                        if end > start:
+                            forward_file.write(
+                                f'{chrom_name}\t{start}\t{start + loop_bin_size}\t'
+                                f'{chrom_name}\t{end}\t{end + loop_bin_size}\t'
+                                f'{window_paths[key]}\n')
+
+                        elif start > end:
+                            back_file.write(
+                                f'{chrom_name}\t{end}\t{end + loop_bin_size}\t'
+                                f'{chrom_name}\t{start}\t{start + loop_bin_size}\t'
+                                f'{window_paths[key]}\n')
+
+                        else:
+                            log.warning(f'Detected self loop: {key}. Maybe bug in '
+                                        f'code. Should have removed when creating '
+                                        f'adj list')
 
 
 def output_random_walk_loops(window_size, loop_bin_size, walk_iter,
