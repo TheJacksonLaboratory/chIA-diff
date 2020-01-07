@@ -15,12 +15,9 @@ MIN_RATIO_INCREASE = 1.1
 MIN_PEAK_VALUE = 70
 
 
-# The length of each normalization call
-
-
 class ChromLoopData:
     """
-    A class used to represent a chromosome in a sample
+    A class used to hold loop information in a sample's chromosome
 
     Attributes
     ----------
@@ -32,7 +29,8 @@ class ChromLoopData:
         Name of the sample (LHH0061, LHH0061_0061H, ...)
     """
 
-    def __init__(self, chrom_name, chrom_size, sample_name):
+    def __init__(self, chrom_name, chrom_size, sample_name,
+                 coverage_bin_size=COVERAGE_BIN_SIZE):
         """
         Parameters
         ----------
@@ -61,20 +59,22 @@ class ChromLoopData:
         self.start_list_peak_values = None
         self.end_list_peak_values = None
 
-        self.peak_bins = None
-        self.peak_bin_size = PEAK_BIN_LEN
+        self.coverage_bins = None
+        self.coverage_bin_size = coverage_bin_size
 
         self.window_loop_list = []
         self.window_total_loop_count = []
         self.window_size = None
         self.numb_windows = None
-        self.window_peak_list = []
+        self.window_coverage_list = []  # Holds a coverage array for each window
 
         self.max_loop_value = 0
 
     def add_loop(self, loop_start1, loop_end1, loop_start2, loop_end2,
                  loop_value):
-        avg_anchor_len = ((loop_end1 - loop_start1) + (loop_end2 - loop_start2)) / 2
+        avg_anchor_len = (
+            (loop_end1 - loop_start1) + (loop_end2 - loop_start2)
+        ) / 2
 
         # Loop span: end of (start anchor) -> start of (end anchor)
         if loop_start2 - loop_end1 < MIN_LOOP_LEN and \
@@ -93,7 +93,7 @@ class ChromLoopData:
     def finish_init(self, bedgraph):
         """
         Finishes the construction of this chromosome. Converts lists to numpy
-        arrays and calls find_loop_anchor_points
+        arrays to save memory.
 
         Parameters
         ----------
@@ -109,6 +109,12 @@ class ChromLoopData:
         if self.numb_loops == 0:
             return False
 
+        # if not bedgraph.has_chrom(self.name):
+        if self.name not in bedgraph.chromosome_map:
+            log.warning(f"{self.name} was not found in corresponding bedgraph: "
+                        f"{bedgraph.name}")
+            return False
+
         self.pet_count_list = np.asarray(self.pet_count_list, dtype=np.int32)
         self.start_anchor_list = np.asarray(self.start_anchor_list,
                                             dtype=np.int32)
@@ -120,18 +126,13 @@ class ChromLoopData:
 
         log.debug(f"Max PET count: {np.max(self.pet_count_list)}")
 
-        # if not bedgraph.has_chrom(self.name):
-        if self.name not in bedgraph.chromosome_map:
-            log.warning(f"{self.name} was not found in corresponding bedgraph: "
-                        f"{bedgraph.name}")
-            return False
-
         self.find_loop_anchor_points(bedgraph)
         return True
 
     def find_loop_anchor_points(self, bedgraph):
         """
-        Finds the max for small non-overlapping bins over the entire chromosome.
+        Finds the max coverage for each small non-overlapping bins over the
+        entire chromosome.
 
         Also finds the exact loop start/end point within anchors by finding the
         index of max value within anchors.
@@ -149,34 +150,32 @@ class ChromLoopData:
 
         bedgraph.load_chrom_data(self.name)
 
-        peak_bin_starts = np.arange(0, self.size, PEAK_BIN_LEN, dtype=np.int32)
-        peak_bin_ends = peak_bin_starts + PEAK_BIN_LEN
-        if peak_bin_ends[-1] > self.size:
-            peak_bin_ends[-1] = self.size
-        self.peak_bins = bedgraph.stats(start_list=peak_bin_starts,
-                                        end_list=peak_bin_ends,
-                                        chrom_name=self.name, stat='max')
+        coverage_bin_starts = np.arange(0, self.size, self.coverage_bin_size,
+                                        dtype=np.int32)
+        coverage_bin_ends = coverage_bin_starts + self.coverage_bin_size
+        if coverage_bin_ends[-1] > self.size:
+            coverage_bin_ends[-1] = self.size
+        self.coverage_bins = bedgraph.stats(start_list=coverage_bin_starts,
+                                            end_list=coverage_bin_ends,
+                                            chrom_name=self.name, stat='max')
 
+        # Somewhat arbitrary way of filtering out bedgraph files
+        # Based on median/max of bedgraph?
+        # TODO: Make this better/applicable to all samples
         min_peak_value = 0
         if 'LHM0008' in self.sample_name:
             min_peak_value = 57
         elif 'LHM0011' in self.sample_name:
             min_peak_value = 47
 
-        for i in range(len(self.peak_bins)):
-            if self.peak_bins[i] <= min_peak_value:
-                self.peak_bins[i] = 0
+        for i in range(len(self.coverage_bins)):
+            if self.coverage_bins[i] <= min_peak_value:
+                self.coverage_bins[i] = 0
 
-        if not os.path.isdir('out'):
-            os.mkdir('out')
+        output_coverage_bins(self.sample_name, self.name, self.coverage_bins,
+                             self.coverage_bin_size)
 
-        with open(f'out/{self.sample_name}.peak_bins={PEAK_BIN_LEN}.txt',
-                  'w') as out_file:
-            for i in range(len(self.peak_bins)):
-                out_file.write(f'{i * PEAK_BIN_LEN}\t{self.peak_bins[i]}\n')
-        # self.peak_bins += 1  # To avoid zeros when summing
-
-        # Get index of peaks in every anchor interval
+        # Get index of peak in each anchor interval
         self.start_list = bedgraph.stats(start_list=self.start_anchor_list[0],
                                          end_list=self.start_anchor_list[1],
                                          chrom_name=self.name, stat='max_index')
@@ -184,7 +183,7 @@ class ChromLoopData:
                                        end_list=self.end_anchor_list[1],
                                        chrom_name=self.name, stat='max_index')
 
-        # Get peak value for every anchor interval
+        # Get peak value for every anchor interval (currently unused)
         start_list_peaks = bedgraph.stats(start_list=self.start_anchor_list[0],
                                           end_list=self.start_anchor_list[1],
                                           chrom_name=self.name, stat='max')
@@ -248,17 +247,17 @@ class ChromLoopData:
         if not window_size:
             window_size = self.size
 
-        self.numb_windows = ceil(self.size / window_size)
         self.window_size = window_size
+        self.numb_windows = ceil(self.size / window_size)
 
         # if window_size % PEAK_BIN_LEN != 0:
         #     log.error(f'Window size: {window_size} must be a multiple of '
         #               f'PEAK_BIN_LEN: {PEAK_BIN_LEN}')
         #     return False
 
-        if window_size < PEAK_BIN_LEN:
+        if window_size < self.coverage_bin_size:
             log.error(f'Window size: {window_size} must be greater than '
-                      f'PEAK_BIN_LEN: {PEAK_BIN_LEN}')
+                      f'Coverage bin size: {self.coverage_bin_size}')
             return False
 
         self.find_window_loops()
@@ -269,7 +268,8 @@ class ChromLoopData:
     def find_window_loops(self):
         """
         Finds the indexes of the loops within each window and stores them in
-        window_loop_list
+        self.window_loop_list. Also stores the total PET count in each window in
+        self.window_total_loop_count.
         """
 
         self.window_loop_list.clear()
@@ -303,7 +303,7 @@ class ChromLoopData:
             Directory to output weighted loops (Default is None)
         """
 
-        self.window_peak_list.clear()
+        self.window_coverage_list.clear()
 
         out_file = None
         if output_dir:
@@ -315,8 +315,8 @@ class ChromLoopData:
             window_start = i * self.window_size
             window_end = window_start + self.window_size
 
-            start = int(window_start / PEAK_BIN_LEN)
-            end = ceil(window_end / PEAK_BIN_LEN)
+            start = int(window_start / self.coverage_bin_size)
+            end = ceil(window_end / self.coverage_bin_size)
 
             numb_loops = self.window_loop_list[i].size
 
@@ -325,7 +325,7 @@ class ChromLoopData:
                 continue
 
             # Get the coverages only from this window
-            window_coverage_list = np.array(self.peak_bins[start:end])
+            window_coverage_list = np.array(self.coverage_bins[start:end])
             # log.debug(f'Unweighted peak values: {peak_list}')
 
             # Make all loops are initialized to have 0 weight
@@ -336,7 +336,7 @@ class ChromLoopData:
             window_coverage_list /= window_coverage_list.sum()
             # log.debug(f'Weighted peak values: {peak_list}')
 
-            self.window_peak_list.append(window_coverage_list)
+            self.window_coverage_list.append(window_coverage_list)
 
             # Get a continuous list of the anchors in this window
             start_anchors = (np.empty(numb_loops, dtype=np.int32),
@@ -360,12 +360,12 @@ class ChromLoopData:
             # log.debug(f'End anchors: {end_anchors}')
 
             start_weights = get_total_bin_value(
-                window_coverage_list, PEAK_BIN_LEN,
+                window_coverage_list, COVERAGE_BIN_SIZE,
                 start_anchors[0] - window_start, start_anchors[1] - window_start)
             # log.debug(f'Start anchor weights: {start_weights}')
 
             end_weights = get_total_bin_value(
-                window_coverage_list, PEAK_BIN_LEN,
+                window_coverage_list, COVERAGE_BIN_SIZE,
                 end_anchors[0] - window_start, end_anchors[1] - window_start)
             # log.debug(f'End anchor weights: {end_weights}')
 
